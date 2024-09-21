@@ -3,6 +3,12 @@
 ## Overview
 The Lab Grading Application is a streamlined tool for managing laboratory course grading. Built with Streamlit, this application allows teachers to efficiently handle student information, assign weekly roles, grade students, and generate detailed grade sheets.
 
+![Dashboard](./docs/dashboard.png)
+
+![Grade Interface](./docs/grading_interface.png)
+
+![Dashboard](./docs/dashboard.png)
+
 ## Key Features
 - **User Authentication**: Secure login and registration for teachers.
 - **Student Management**: Easily add, edit, and remove students.
