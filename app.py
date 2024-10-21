@@ -1,8 +1,7 @@
 import streamlit as st
 from utils.auth import login, register
 from components import dashboard, student_management, grading_interface, download_gradesheet
-from utils.initialize_csv_db import initialize_db
-from utils.data_manager import get_teacher_info
+from utils.db_manager import get_teacher, initialize_db
 import time
 import os
 from dotenv import load_dotenv
@@ -29,7 +28,7 @@ def main():
         with tab2:
             register()
     else:
-        teacher_info = get_teacher_info(st.session_state.teacher_id)
+        teacher_info = get_teacher(st.session_state.teacher_id)
                 
                 
         st.sidebar.title(f"Welcome, {st.session_state.user}")

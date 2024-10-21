@@ -1,9 +1,10 @@
 import streamlit as st
-import pandas as pd
 import datetime
-from utils.data_manager import get_students, get_roles, get_grading_rubrics, save_grades, get_grades, get_student_week_roles, save_student_week_roles
+from utils.db_manager import (
+    get_students, get_roles, get_grades, get_student_week_roles, 
+    save_grade2db, assign_student_role, update_grade, update_student_role
+)
 from utils.rubric_generator import generate_rubric_pdf
-from components.student_management import assign_student_roles
 import json
 from datetime import date, time
 import time as ttime
@@ -12,109 +13,115 @@ def show(teacher_id):
     st.header("Grading Interface")
 
     tab1, tab2 = st.tabs(["Grade Student", "Download Graded Rubric"])
-    grades = get_grades()
-    students = get_students()
+    grades = get_grades(teacher_id)
+    students = get_students(teacher_id)
     roles = get_roles()
-    teacher_students_df = students[students['teacher_id'] == teacher_id]
+    teacher_students = [s for s in students if s['teacher_id'] == teacher_id]
 
     with tab1:
-        grade_student(teacher_id, teacher_students_df, grades, students, roles)
+        grade_student(teacher_id, teacher_students, grades, students, roles)
 
     with tab2:
-        download_rubric(teacher_students_df)
+        download_rubric(teacher_students, roles, grades, teacher_id)
 
-def select_student_week_role(teacher_id, teacher_students_df):
-    roles = get_roles()
-    
-    if teacher_students_df.empty:
+def select_student_week_role(teacher_id, teacher_students, roles):
+    if not teacher_students:
         st.warning("You have not registered any students yet")
         return None, None, None
 
-    student = st.selectbox("Select Student", teacher_students_df['name'].tolist())
+    student = st.selectbox("Select Student", [s['name'] for s in teacher_students])
     week = st.number_input("Week", min_value=1, max_value=52, step=1)
 
-    student_week_roles = get_student_week_roles()
-    student_role = student_week_roles[
-        (student_week_roles['student_id'] == teacher_students_df[teacher_students_df['name'] == student]['id'].iloc[0]) & 
-        (student_week_roles['week'] == week)
-    ]
+    # Initialize session state for storing the updated role
+    if 'updated_role' not in st.session_state:
+        st.session_state.updated_role = None
 
-    if not student_role.empty:
-        student_role_id = student_role['role_id'].iloc[0]
-        role = roles[roles['id'] == student_role_id]['name'].iloc[0]
+    student_week_roles = get_student_week_roles(teacher_id)
+    student_role = next((r for r in student_week_roles if r['student_id'] == next(s['id'] for s in teacher_students if s['name'] == student) and r['week'] == week), None)
+
+    if student_role or st.session_state.updated_role:
+        if st.session_state.updated_role:
+            role = st.session_state.updated_role
+        else:
+            role = next(r['name'] for r in roles if r['id'] == student_role['role_id'])
         st.info(f"Role assigned for {student} in week {week}: {role}")
         
         edit_role = st.checkbox("Edit Role")
         if edit_role:
-            new_role = st.selectbox("Select New Role", roles['name'].tolist())
+            new_role = st.selectbox("Select New Role", [r['name'] for r in roles])
             if st.button("Update Role"):
-                assign_student_roles(
-                    teacher_students_df[teacher_students_df['name'] == student]['id'].iloc[0],
-                    roles[roles['name'] == new_role]['id'].iloc[0],
-                    week,
-                    overwrite=True,
-                    teacher_id=teacher_id
+                update_student_role(
+                    student_role['id'],
+                    next(r['id'] for r in roles if r['name'] == new_role),
+                    teacher_id
                 )
                 st.success(f"Role updated to {new_role} for {student} in week {week}")
+                st.session_state.updated_role = new_role
                 ttime.sleep(1)
                 st.rerun()
     else:
         st.warning(f"No role assigned for {student} in week {week}")
-        new_role = st.selectbox("Select Role", roles['name'].tolist())
+        new_role = st.selectbox("Select Role", [r['name'] for r in roles])
         if st.button("Assign Role"):
-            assign_student_roles(
-                teacher_students_df[teacher_students_df['name'] == student]['id'].iloc[0],
-                roles[roles['name'] == new_role]['id'].iloc[0],
+            assign_student_role(
+                next(s['id'] for s in teacher_students if s['name'] == student),
+                next(r['id'] for r in roles if r['name'] == new_role),
                 week,
-                teacher_id=teacher_id
+                teacher_id
             )
             st.success(f"Role assigned to {student} for week {week}")
+            st.session_state.updated_role = new_role
             ttime.sleep(1)
             st.rerun()
         return student, week, None
 
-    return student, week, role
+    return student, week, role if st.session_state.updated_role is None else st.session_state.updated_role
 
-def grade_student(teacher_id, teacher_students_df, grades, student_df, roles_df):
+def grade_student(teacher_id, teacher_students, grades, students, roles):
     st.header("Grade Student")
 
-    student, week, role = select_student_week_role(teacher_id, teacher_students_df)
+    student, week, role = select_student_week_role(teacher_id, teacher_students, roles)
 
     if not all([student, week, role]):
         st.warning("Please ensure a student is selected, a week is chosen, and a role is assigned before grading.")
         return
 
-    existing_grade = grades[
-        (grades['student_id'] == student_df[student_df['name'] == student]['id'].iloc[0]) & 
-        (grades['role_id'] == roles_df[roles_df['name'] == role]['id'].iloc[0]) & 
-        (grades['week'] == week)
-    ]
+    existing_grade = next((g for g in grades if g['student_id'] == next(s['id'] for s in students if s['name'] == student) and 
+                           g['week'] == week), None)
 
-    if not existing_grade.empty:
-        st.warning(f"A grade already exists for {student} in week {week} for role {role}.")
-        grade_data = existing_grade.iloc[0]
+    if existing_grade:
+        existing_role = next(r['name'] for r in roles if r['id'] == existing_grade['role_id'])
+        if existing_role != role:
+            st.warning(f"A grade already exists for {student} in week {week} for role {existing_role}. The role has been updated to {role}.")
+        else:
+            st.warning(f"A grade already exists for {student} in week {week} for role {role}.")
+        grade_data = existing_grade
     else:
         grade_data = {}
 
     # Display the appropriate grading form based on the selected role
     if role == "Toastmaster":
-        toastmaster_grading_form(student, week, grade_data, student_df, roles_df)
+        toastmaster_grading_form(student, week, grade_data, students, roles, grades, teacher_id)
     elif role == "Table Topic":
-        table_topic_grading_form(student, week, grade_data, student_df, roles_df)
+        table_topic_grading_form(student, week, grade_data, students, roles, grades, teacher_id)
     elif role == "Camera Assistant":
-        camera_assistant_grading_form(student, week, grade_data, student_df, roles_df)
+        camera_assistant_grading_form(student, week, grade_data, students, roles, grades, teacher_id)
     elif role == "Group Leader":
-        group_leader_grading_form(student, week, grade_data, student_df, roles_df)
+        group_leader_grading_form(student, week, grade_data, students, roles, grades, teacher_id)
     elif role == "Group Reporter":
-        group_reporter_grading_form(student, week, grade_data, student_df, roles_df)
+        group_reporter_grading_form(student, week, grade_data, students, roles, grades, teacher_id)
     elif role == "SMT":
-        smt_presenter_grading_form(student, week, grade_data, student_df, roles_df)
-    # Add more elif statements for other roles...
+        smt_presenter_grading_form(student, week, grade_data, students, roles, grades, teacher_id)
     else:
         st.write("Grading form for this role is not implemented yet.")
 
+    # Clear the updated role from session state after grading
+    if 'updated_role' in st.session_state:
+        del st.session_state.updated_role
 
-def toastmaster_grading_form(student, week, grade_data, student_df, roles_df):
+
+
+def toastmaster_grading_form(student, week, grade_data, student_df, roles_df, grades_df, teacher_id):
     st.subheader(f"Toastmaster Grading Form for {student} - Week {week}")
     score_breakdown = {}
     with st.form("toastmaster_grading_form"):
@@ -169,7 +176,7 @@ def toastmaster_grading_form(student, week, grade_data, student_df, roles_df):
             overwrite = st.checkbox("Overwrite existing grade", value=False)
 
     if submit_button:
-        success = save_grade(student, role, week, total_grade, comments, score_breakdown, student_df, roles_df, overwrite=overwrite)
+        success = save_grade(student, role, week, total_grade, comments, score_breakdown, student_df, roles_df, grades_df, overwrite=overwrite, teacher_id=teacher_id)
         if success:
             if overwrite:
                 st.success("Grade overwritten successfully!")
@@ -181,7 +188,7 @@ def toastmaster_grading_form(student, week, grade_data, student_df, roles_df):
     
 
 
-def table_topic_grading_form(student, week, grade_data, student_df, roles_df):
+def table_topic_grading_form(student, week, grade_data, student_df, roles_df, grades_df, teacher_id):
     st.subheader(f"Table Topic Grading Form for {student} - Week {week}")
 
     score_breakdown = {}
@@ -241,7 +248,7 @@ def table_topic_grading_form(student, week, grade_data, student_df, roles_df):
             overwrite = st.checkbox("Overwrite existing grade", value=False)
 
     if submit_button:
-        success = save_grade(student, role, week, total_grade, comments, score_breakdown, student_df, roles_df, overwrite=overwrite)
+        success = save_grade(student, role, week, total_grade, comments, score_breakdown, student_df, roles_df, grades_df, overwrite=overwrite, teacher_id=teacher_id)
         if success:
             if overwrite:
                 st.success("Grade overwritten successfully!")
@@ -252,14 +259,14 @@ def table_topic_grading_form(student, week, grade_data, student_df, roles_df):
 
     
             
-def camera_assistant_grading_form(student, week, grade_data, student_df, roles_df):
+def camera_assistant_grading_form(student, week, grade_data, student_df, roles_df, grades_df, teacher_id):
     st.subheader(f"Camera Assistant Grading Form for {student} - Week {week}")
     score_breakdown = {}
     with st.form("camera_assistant_grading_form_" + str(week)):
         st.write("a. Video Footage:")
-        video_is_recorded = st.slider("Video is recorded", 0, 20, grade_data.get('video_is_recorded', 10))
-        video_is_posted_on_youtube = st.slider("Video is posted on YouTube", 0, 20, grade_data.get('video_is_posted_on_youtube', 10))
-        private_video_link_shared = st.slider("Private video link shared", 0, 20, grade_data.get('private_video_link_shared', 10))
+        video_is_recorded = st.slider("Video is recorded", 0, 10, grade_data.get('video_is_recorded', 10))
+        video_is_posted_on_youtube = st.slider("Video is posted on YouTube", 0, 10, grade_data.get('video_is_posted_on_youtube', 10))
+        private_video_link_shared = st.slider("Private video link shared", 0, 10, grade_data.get('private_video_link_shared', 10))
 
         score_breakdown['video_is_recorded'] = video_is_recorded
         score_breakdown['video_is_posted_on_youtube'] = video_is_posted_on_youtube
@@ -296,7 +303,7 @@ def camera_assistant_grading_form(student, week, grade_data, student_df, roles_d
             overwrite = st.checkbox("Overwrite existing grade", value=False)
 
     if submit_button:
-        success = save_grade(student, role, week, total_grade, comments, score_breakdown, student_df, roles_df, overwrite=overwrite)
+        success = save_grade(student, role, week, total_grade, comments, score_breakdown, student_df, roles_df, grades_df, overwrite=overwrite, teacher_id=teacher_id)
         if success:
             if overwrite:
                 st.success("Grade overwritten successfully!")
@@ -307,7 +314,7 @@ def camera_assistant_grading_form(student, week, grade_data, student_df, roles_d
 
             
             
-def group_leader_grading_form(student, week, grade_data, student_df, roles_df):
+def group_leader_grading_form(student, week, grade_data, student_df, roles_df, grades_df, teacher_id):
     st.subheader(f"Group Leader Grading Form for {student} - Week {week}")
     score_breakdown = {}
     
@@ -424,7 +431,7 @@ def group_leader_grading_form(student, week, grade_data, student_df, roles_df):
             overwrite = st.checkbox("Overwrite existing grade", value=False)
 
     if submit_button:
-        success = save_grade(student, role, week, total_grade, comments, score_breakdown, student_df, roles_df, overwrite=overwrite)
+        success = save_grade(student, role, week, total_grade, comments, score_breakdown, student_df, roles_df, grades_df, overwrite=overwrite, teacher_id=teacher_id)
         if success:
             if overwrite:
                 st.success("Grade overwritten successfully!")
@@ -434,7 +441,7 @@ def group_leader_grading_form(student, week, grade_data, student_df, roles_df):
             st.warning("A grade already exists for this student, role, and week. Use the overwrite checkbox to update it.")
 
             
-def group_reporter_grading_form(student, week, grade_data, student_df, roles_df):
+def group_reporter_grading_form(student, week, grade_data, student_df, roles_df, grades_df, teacher_id):
     st.subheader(f"Group Reporter Grading Form for {student} - Week {week}")
     score_breakdown = {}
     with st.form("group_reporter_grading_form"):
@@ -546,7 +553,7 @@ def group_reporter_grading_form(student, week, grade_data, student_df, roles_df)
             overwrite = st.checkbox("Overwrite existing grade", value=False)
 
     if submit_button:
-        success = save_grade(student, role, week, total_grade, comments, score_breakdown, student_df, roles_df, overwrite=overwrite)
+        success = save_grade(student, role, week, total_grade, comments, score_breakdown, student_df, roles_df, grades_df, overwrite=overwrite, teacher_id=teacher_id)
         if success:
             if overwrite:
                 st.success("Grade overwritten successfully!")
@@ -556,7 +563,7 @@ def group_reporter_grading_form(student, week, grade_data, student_df, roles_df)
             st.warning("A grade already exists for this student, role, and week. Use the overwrite checkbox to update it.")
 
 
-def smt_presenter_grading_form(student, week, grade_data, student_df, roles_df):
+def smt_presenter_grading_form(student, week, grade_data, student_df, roles_df, grades_df, teacher_id):
     st.subheader(f"SMT Presenter Grading Form for {student} - Week {week}")
     role = "SMT Presenter"
     score_breakdown = {}
@@ -674,7 +681,7 @@ def smt_presenter_grading_form(student, week, grade_data, student_df, roles_df):
             overwrite = st.checkbox("Overwrite existing grade", value=False)
 
     if submit_button:
-        success = save_grade(student, role, week, total_grade, comments, score_breakdown, student_df, roles_df, overwrite=overwrite)
+        success = save_grade(student, role, week, total_grade, comments, score_breakdown, student_df, roles_df, grades_df, overwrite=overwrite, teacher_id=teacher_id)
         if success:
             if overwrite:
                 st.success("Grade overwritten successfully!")
@@ -684,37 +691,25 @@ def smt_presenter_grading_form(student, week, grade_data, student_df, roles_df):
             st.warning("A grade already exists for this student, role, and week. Use the overwrite checkbox to update it.")
 
             
-def download_rubric(teacher_students_df):
+def download_rubric(teacher_students, roles, grades, teacher_id):
     st.subheader("Download Graded Rubric")
-    
-    if teacher_students_df.empty:
+    if not teacher_students:
         st.warning("You have not registered any students yet")
+    elif not grades:
+        st.warning("No grades have been saved yet")
     else:
-        roles = get_roles()
-        grades = get_grades()
-
-        student = st.selectbox("Select Student", teacher_students_df['name'].tolist(), key="download_student")
-        role = st.selectbox("Select Role", roles['name'].tolist(), key="download_role")
-        available_weeks = grades[(grades['student_id'] == teacher_students_df[teacher_students_df['name'] == student]['id'].iloc[0]) & 
-                                (grades['role_id'] == roles[roles['name'] == role]['id'].iloc[0])]['week'].tolist()
+        student = st.selectbox("Select Student", [s['name'] for s in teacher_students], key="download_student")
+        role = st.selectbox("Select Role", [r['name'] for r in roles], key="download_role")
+        available_weeks = [g['week'] for g in grades if g['student_id'] == next(s['id'] for s in teacher_students if s['name'] == student) and 
+                           g['role_id'] == next(r['id'] for r in roles if r['name'] == role)]
         week = st.selectbox("Select Week", available_weeks, key="download_week")
 
         if st.button("Generate Rubric"):
-            grade_data = grades[(grades['student_id'] == teacher_students_df[teacher_students_df['name'] == student]['id'].iloc[0]) & 
-                                (grades['role_id'] == roles[roles['name'] == role]['id'].iloc[0]) & 
-                                (grades['week'] == week)].iloc[0]
+            grade_data = next(g for g in grades if g['student_id'] == next(s['id'] for s in teacher_students if s['name'] == student) and 
+                              g['role_id'] == next(r['id'] for r in roles if r['name'] == role) and 
+                              g['week'] == week)
 
-            rubric_data = {
-                'first_last_impression': grade_data['first_last_impression'],
-                'transitions': grade_data['transitions'],
-                'timing_questions': grade_data['timing_questions'],
-                'stature_vocal': grade_data['stature_vocal'],
-                'subtotal_moderation': grade_data['subtotal_moderation'],
-                'subtotal_comments': grade_data['subtotal_comments'],
-                'deductions': grade_data['deductions'],
-                'total_grade': grade_data['score'],
-                'comments': grade_data['comments'],
-            }
+            rubric_data = json.loads(grade_data['score_breakdown'])
 
             pdf_buffer = generate_rubric_pdf(role, rubric_data)
             st.download_button(
@@ -724,43 +719,26 @@ def download_rubric(teacher_students_df):
                 mime="application/pdf"
             )
 
+def save_grade(student, role, week, total_grade, comments, score_breakdown, students, roles, grades, overwrite=False, teacher_id=None):
+    student_id = next(s['id'] for s in students if s['name'] == student)
+    role_id = next(r['id'] for r in roles if r['name'] == role)
+
+    existing_grade = next((g for g in grades if g['student_id'] == student_id and g['week'] == week), None)
+
+    if existing_grade:
+        if overwrite:
+            # Update the existing grade
+            update_grade(existing_grade['id'], total_grade, comments, score_breakdown, role_id, teacher_id)
+            return True
+        else:
+            # Grade exists and we're not overwriting
+            return False
+    else:
+        # No existing grade, create a new one
+        save_grade2db(student_id, role_id, week, total_grade, comments, score_breakdown, teacher_id)
+        return True
 
 def date_time_serializer(obj):
     if isinstance(obj, (date, time)):
         return obj.isoformat()
     raise TypeError(f"Type {type(obj)} not serializable")
-
-
-def save_grade(student, role, week, total_grade, comments, score_breakdown, student_df, roles_df, edit_mode=False, overwrite=False):
-    grades_df = pd.read_csv("data/grades.csv")
-    student_id = student_df[student_df['name'] == student].iloc[0]['id']
-    role_id = roles_df[roles_df['name'] == role].iloc[0]['id']
-
-    existing_grade = grades_df[(grades_df['student_id'] == student_id) & (grades_df['week'] == week)]
-
-    if edit_mode or (existing_grade.empty or overwrite):
-        if existing_grade.empty:
-            new_grade = pd.DataFrame({
-                "id": [len(grades_df) + 1],
-                "student_id": [student_id],
-                "role_id": [role_id],
-                "week": [week],
-                "total_score": [total_grade],
-                "comments": [comments],
-                "score_breakdown": [json.dumps(score_breakdown, default=date_time_serializer)],
-                "timestamp": [pd.Timestamp.now()]
-            })
-            grades_df = pd.concat([grades_df, new_grade], ignore_index=True)
-        else:
-            grades_df.loc[(grades_df['student_id'] == student_id) & (grades_df['week'] == week), 
-                          ['total_score', 'comments', 'score_breakdown', 'role_id']] = [
-                              total_grade, 
-                              comments, 
-                              json.dumps(score_breakdown, default=date_time_serializer),
-                              role_id
-                          ]
-        save_grades(grades_df)
-        return True
-    else:
-        return False
-    

@@ -1,8 +1,10 @@
 import streamlit as st
-import pandas as pd
-from utils.data_manager import get_teachers, save_teachers
 import hashlib
 import uuid
+from utils.db_manager import (
+    get_teacher, create_teacher, get_all_teachers,
+    initialize_db
+)
 
 def login():
     st.subheader("Login")
@@ -10,16 +12,15 @@ def login():
     password = st.text_input("Password", type="password")
 
     if st.button("Login"):
-        teachers_df = get_teachers()
-        user = teachers_df[teachers_df['username'] == username]
+        user = get_teacher(username=username)
         
-        if not user.empty:
-            stored_password = user.iloc[0]['password']
+        if user:
+            stored_password = user['password']
             hashed_password = hashlib.sha256(password.encode()).hexdigest()
             
             if stored_password == hashed_password:
                 st.session_state.user = username
-                st.session_state.teacher_id = user.iloc[0]['teacher_id']
+                st.session_state.teacher_id = user['id']
                 st.success(f"Logged in as {username}")
                 st.rerun()
             else:
@@ -38,27 +39,19 @@ def register():
             st.error("Passwords do not match")
             return
 
-        teachers_df = get_teachers()
-        if new_username in teachers_df['username'].values:
+        existing_teacher = get_teacher(username=new_username)
+        if existing_teacher:
             st.error("Username already exists")
             return
 
         hashed_password = hashlib.sha256(new_password.encode()).hexdigest()
-        teacher_id = uuid.uuid4()
-        new_teacher = pd.DataFrame({
-            'id': [teachers_df['id'].max() + 1 if not teachers_df.empty else 1],
-            'username': [new_username],
-            'password': [hashed_password],
-            'teacher_id': [teacher_id]
-        })
-        
-        updated_teachers = pd.concat([teachers_df, new_teacher], ignore_index=True)
-        save_teachers(updated_teachers)
+        teacher_id = create_teacher(new_username, hashed_password)
         
         st.success("Registration successful. You can now log in.")
 
 def logout():
     st.session_state.user = None
+    st.session_state.teacher_id = None
     st.success("Logged out successfully")
     st.rerun()
 
@@ -67,3 +60,6 @@ def is_logged_in():
 
 def get_current_user():
     return st.session_state.user
+
+# Initialize the database when the app starts
+initialize_db()

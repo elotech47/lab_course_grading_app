@@ -2,8 +2,7 @@ import pandas as pd
 import io
 from datetime import datetime, timedelta
 import streamlit as st
-from utils.data_manager import get_students, get_grades, get_roles
-
+from utils.db_manager import get_students, get_grades, get_roles
 
 def get_role_full_scores():
     role_total_scores = {
@@ -42,13 +41,11 @@ def get_holidays():
 def grade_sheet(teacher_id):
     st.header("Download Grade Sheet")
 
-    teacher_students_df = get_students()
-    teacher_students_df = teacher_students_df[teacher_students_df['teacher_id'] == teacher_id]
-    teacher_grades_df = get_grades()
-    teacher_grades_df = teacher_grades_df[teacher_grades_df['student_id'].isin(teacher_students_df['id'])]
-    teacher_roles_df = get_roles()
+    teacher_students = get_students(teacher_id)
+    teacher_grades = get_grades(teacher_id)
+    teacher_roles = get_roles()
     
-    if teacher_students_df.empty:
+    if not teacher_students:
         st.warning("You have not registered any students yet")
     else:
         role_dict = {
@@ -80,16 +77,16 @@ def grade_sheet(teacher_id):
             
             student_final_scores = {}
             # Process each student
-            for _, student in teacher_students_df.iterrows():
-                student_grades = teacher_grades_df[teacher_grades_df['student_id'] == student['id']]
+            for student in teacher_students:
+                student_grades = [grade for grade in teacher_grades if grade['student_id'] == student['id']]
                 # Create student DataFrame
                 student_df = pd.DataFrame(index=date_range, columns=columns)
                 student_df['DATES'] = student_df.index.strftime('%m/%d/%y')
                 
                 # Fill in grades
                 role_total_scores, role_full_scores = get_role_full_scores()
-                for _, grade in student_grades.iterrows():
-                    role = teacher_roles_df[teacher_roles_df['id'] == grade['role_id']]['name'].iloc[0]
+                for grade in student_grades:
+                    role = next(r['name'] for r in teacher_roles if r['id'] == grade['role_id'])
                     role_name = role_dict.get(role, role)
                     week_date = start_date + timedelta(weeks=grade['week']-1)
                     student_df.loc[week_date, role_name] = grade['total_score']
@@ -113,12 +110,11 @@ def grade_sheet(teacher_id):
                         print(f"Student date index: {student_df.index}")
                         print(f"Holiday week start: {holiday_week_start}")
                         
-                        
                 # Add total and obtained score rows
                 role_scores_total = [role_total_scores[role] * role_full_scores[role] for role in role_total_scores]
                 total_row = ['Total Score'] + role_scores_total + [sum(role_scores_total), '', '', '']
-                obtained_scores = student_grades.groupby('role_id')['total_score'].sum()
-                obtained_row = ['Obtained Score'] + [obtained_scores.get(i, 0) for i in range(1, 7)]
+                obtained_scores = {role_dict.get(next(r['name'] for r in teacher_roles if r['id'] == grade['role_id']), ''): grade['total_score'] for grade in student_grades}
+                obtained_row = ['Obtained Score'] + [obtained_scores.get(role, 0) for role in ['TM', 'TT', 'CAMERA', 'LEAD', 'REPORTER', 'SMT']]
                 total_obtained = sum(obtained_row[1:7])
                 percentage = (total_obtained / sum(role_scores_total)) * 100 if sum(role_scores_total) != 0 else 0
                 
@@ -141,7 +137,7 @@ def grade_sheet(teacher_id):
             main_df['Final Score'] = ''
             # Create a space before these rows
             main_df = pd.concat([main_df.iloc[:0], main_df], ignore_index=True)
-            for i, student in teacher_students_df.iterrows():
+            for i, student in enumerate(teacher_students):
                 main_df.loc[i, 'ID'] = i + 1
                 main_df.loc[i, 'Student'] = student['name']
                 # Add the student score to the total score
